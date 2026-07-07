@@ -1,0 +1,36 @@
+document_types:
+  luat:
+    label: "Luật"
+    patterns: ["\\bLUẬT\\b", "\\bQH\\d+\\b"]
+  quyet_dinh:
+    label: "Quyết định"
+    patterns: ["\\bQUYẾT\\s+ĐỊNH\\b", "\\bQĐ[-/]"]
+  thong_tu:
+    label: "Thông tư"
+    patterns: ["\\bTHÔNG\\s+TƯ\\b", "\\bTT[-/]"]
+  nghi_dinh:
+    label: "Nghị định"
+    patterns: ["\\bNGHỊ\\s+ĐỊNH\\b", "\\bNĐ[-/]"]
+  nghi_quyet:
+    label: "Nghị quyết"
+    patterns: ["\\bNGHỊ\\s+QUYẾT\\b", "\\bNQ[-/]"]
+  cong_van:
+    label: "Công văn"
+    patterns: ["\\bCÔNG\\s+VĂN\\b", "\\bCV[-/]"]
+  huong_dan:
+    label: "Hướng dẫn"
+    patterns: ["\\bHƯỚNG\\s+DẪN\\b"]
+  ke_hoach:
+    label: "Kế hoạch"
+    patterns: ["\\bKẾ\\s+HOẠCH\\b", "\\bKH[-/]"]
+  chi_thi:
+    label: "Chỉ thị"
+    patterns: ["\\bCHỈ\\s+THỊ\\b", "\\bCT[-/]"]
+agency_markers:
+  - "ỦY BAN NHÂN DÂN"
+  - "UBND"
+  - "BỘ "
+  - "SỞ "
+  - "CỤC "
+  - "TỔNG CỤC"
+  - "HỘI ĐỒNG NHÂN DÂN"

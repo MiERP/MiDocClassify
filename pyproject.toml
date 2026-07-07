@@ -1,0 +1,15 @@
+[project]
+name = "phanloaivanban"
+version = "0.1.0"
+description = "Lightweight Vietnamese legal document classifier"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+desktop = ["PySide6>=6.6"]
+parsers = ["pypdfium2>=4.30", "python-docx>=1.1", "PyYAML>=6.0"]
+test = ["pytest>=8.0"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
