@@ -1,0 +1,39 @@
+# Wiki artifacts (generated)
+data/wiki/
+
+# Database
+data/*.sqlite
+data/*.db
+
+# Exports
+output/
+
+# Local/runtime artifacts
+runtime/
+temp/
+.codegraph/
+.omo/
+.pytest_cache/
+_dev_smoke/
+_dev_smoke_small/
+_manual_qa_tmp/
+
+# Reference/vendor archives
+sources/
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
