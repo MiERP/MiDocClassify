@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from dataclasses import replace
@@ -11,7 +12,7 @@ from .models import DocumentRecord
 from .taxonomy import classify_type
 
 SO_VAN_BAN_RE = re.compile("(?:S\u1ed1|So|Lu\u1eadt s\u1ed1)\\s*[:\uff1a]?\\s*([0-9]+\\s*/\\s*[A-Z\u0110a-z\u01110-9./\\-]+)", re.IGNORECASE)
-FILENAME_SO_RE = re.compile(r"(\d{1,4})[_-](\d{4})[_-](QH\d+)", re.IGNORECASE)
+FILENAME_SO_RE = re.compile(r"(\d{1,4})[_-](?:(\d{4})[_-])?(QH\d+|[A-ZĐ]{2,}(?:-[A-ZĐa-z]{2,})*)", re.IGNORECASE)
 SO_SUFFIX_RE = re.compile(r"(?:Số|So)\s*[:：]?\s*(/\s*\d{4}\s*/\s*[A-ZĐa-zđ0-9./\-]+)", re.IGNORECASE)
 DATE_RE = re.compile("ng\u00e0y\\s+(\\d{1,2})\\s+th\u00e1ng\\s+(\\d{1,2})\\s+n\u0103m\\s+(\\d{4})", re.IGNORECASE)
 AGENCY_SKIP = ("C\u1ed8NG H\u00d2A", "\u0110\u1ed8C L\u1eacP", "S\u1ed1:", "S\u1ed0:", "Lu\u1eadt s\u1ed1:")
@@ -29,6 +30,7 @@ DOC_TYPE_LABELS = {
     "QUYẾT ĐỊNH": "Quyết định",
     "NGHỊ QUYẾT": "Nghị quyết",
     "THÔNG TƯ": "Thông tư",
+    "THÔNG BÁO": "Thông báo",
     "CHỈ THỊ": "Chỉ thị",
     "CÔNG VĂN": "Công văn",
     "KẾ HOẠCH": "Kế hoạch",
@@ -48,12 +50,30 @@ def extract_so_van_ban(text: str) -> str | None:
     return re.sub(r"\s+", "", match.group(1)) if match else None
 
 
+def _normalize_number_code(value: str) -> str:
+    parts = value.split("-")
+    normalized: list[str] = []
+    for part in parts:
+        upper = part.upper()
+        if upper == "ND":
+            normalized.append("NĐ")
+        elif upper == "QD":
+            normalized.append("QĐ")
+        elif upper == "TTG":
+            normalized.append("TTg")
+        else:
+            normalized.append(upper)
+    return "-".join(normalized)
+
+
 def extract_so_from_filename(file_name: str) -> str | None:
     match = FILENAME_SO_RE.search(file_name)
     if not match:
         return None
     number, year, term = match.groups()
-    return f"{int(number):02d}/{year}/{term.upper()}"
+    code = _normalize_number_code(term)
+    prefix = f"{int(number):02d}" if code.upper().startswith("QH") else str(int(number))
+    return f"{prefix}/{year}/{code}" if year else f"{prefix}/{code}"
 
 
 def extract_so_from_header(text: str) -> str | None:
@@ -79,10 +99,24 @@ def extract_ngay_ban_hanh(text: str) -> str | None:
     return f"{year:04d}-{month:02d}-{day:02d}"
 
 
+def _ascii_key(value: str) -> str:
+    return "".join(
+        char for char in unicodedata.normalize("NFD", value).upper() if unicodedata.category(char) != "Mn"
+    )
+
+
 def _clean_header_line(line: str) -> str:
     line = re.sub(r"\s+", " ", line).strip(" -–—")
     line = line.replace("B ộ", "BỘ").replace("B Ộ", "BỘ").replace("QUỎC", "QUỐC")
     line = re.sub(r"^[^A-Za-zÀ-ỹĐđ]+|[^A-Za-zÀ-ỹĐđ]+$", "", line).strip(" -–—")
+    key = _ascii_key(line)
+    for marker in ("THU TUONG", "VAN PHONG", "QUOC HOI", "CHINH PHU", "BO ", "CUC ", "UY BAN"):
+        index = key.find(marker)
+        if index == 0:
+            break
+        if index > 0:
+            line = line[index:]
+            break
     return line
 
 

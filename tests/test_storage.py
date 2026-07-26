@@ -3,8 +3,12 @@ import sqlite3
 from pathlib import Path
 
 from phanloaivanban.models import DocumentRecord
-from phanloaivanban.storage import export_csv, init_db, upsert_record
-
+from phanloaivanban.storage import (
+    export_csv,
+    init_db,
+    upsert_record,
+    upsert_records,
+)
 
 def test_upsert_and_export_preserve_wiki_path_and_link_goc(tmp_path: Path) -> None:
     db_path = tmp_path / "records.sqlite"
@@ -31,7 +35,6 @@ def test_upsert_and_export_preserve_wiki_path_and_link_goc(tmp_path: Path) -> No
     assert row == ("file:///orig.pdf", "data/wiki/x.md")
     assert exported["link_goc"] == "file:///orig.pdf"
     assert exported["wiki_path"] == "data/wiki/x.md"
-
 
 def test_init_db_migrates_legacy_database_without_wiki_path(tmp_path: Path) -> None:
     db_path = tmp_path / "legacy.sqlite"
@@ -84,3 +87,29 @@ def test_init_db_migrates_legacy_database_without_wiki_path(tmp_path: Path) -> N
     assert row == ("file:///legacy.pdf", "data/wiki/legacy.md")
     assert exported["link_goc"] == "file:///legacy.pdf"
     assert exported["wiki_path"] == "data/wiki/legacy.md"
+
+def test_init_db_adds_incremental_columns_indexes_and_pragmas(tmp_path: Path) -> None:
+    db_path = tmp_path / "records.sqlite"
+    init_db(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(documents)")}
+        indexes = {row[1] for row in conn.execute("PRAGMA index_list(documents)")}
+        journal_mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+
+    assert {"file_size", "mtime_ns", "extractor_version", "indexed_at"} <= columns
+    assert {"idx_documents_original_path", "idx_documents_file_hash", "idx_documents_needs_review", "idx_documents_so_van_ban"} <= indexes
+    assert journal_mode == "wal"
+
+def test_upsert_uses_original_path_and_allows_duplicate_hashes(tmp_path: Path) -> None:
+    db_path = tmp_path / "records.sqlite"
+    init_db(db_path)
+    first = DocumentRecord(Path("a.pdf"), "a.pdf", "same-hash")
+    second = DocumentRecord(Path("b.pdf"), "b.pdf", "same-hash")
+
+    upsert_records(db_path, [first, second])
+    upsert_record(db_path, DocumentRecord(Path("a.pdf"), "renamed.pdf", "new-hash"))
+
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute("SELECT original_path, file_name, file_hash FROM documents ORDER BY original_path").fetchall()
+    assert rows == [("a.pdf", "renamed.pdf", "new-hash"), ("b.pdf", "b.pdf", "same-hash")]

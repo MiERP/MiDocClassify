@@ -113,8 +113,11 @@ def test_extract_doc_conversion_does_not_pollute_source_folder(tmp_path: Path, m
     soffice.parent.mkdir(parents=True)
     soffice.write_bytes(b"")
     polluted_dir = source.parent / ".converted"
+    captured_creationflags = None
 
     def fake_run(args, **kwargs):
+        nonlocal captured_creationflags
+        captured_creationflags = kwargs.get("creationflags")
         output_dir = Path(args[args.index("--outdir") + 1])
         (output_dir / "source.docx").write_bytes(b"converted")
         return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
@@ -133,6 +136,7 @@ def test_extract_doc_conversion_does_not_pollute_source_folder(tmp_path: Path, m
     assert status == "ok"
     assert ocr_engine is None
     assert not polluted_dir.exists()
+    assert captured_creationflags == getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
 class _FakePdfPage:
@@ -183,10 +187,10 @@ def test_extract_pdf_renders_empty_text_pages_to_temp_images_for_ocr(tmp_path: P
 
     text, status, ocr_engine = extractors.extract_text(source, runtime_dir=tmp_path / "runtime")
 
-    assert text == "ocr page-1"
+    assert text == "ocr page-1\n\nocr page-2"
     assert status == "ok"
     assert ocr_engine == "tesseract"
-    assert len(_FakePdfDocument.rendered_paths) == 1
+    assert len(_FakePdfDocument.rendered_paths) == 2
     assert all(not path.exists() for path in _FakePdfDocument.rendered_paths)
     assert not list(source.parent.glob("*.png"))
 
@@ -227,7 +231,7 @@ def test_extract_pdf_empty_text_without_bundled_tesseract_returns_runtime_status
     text, status, ocr_engine = extractors.extract_text(source, runtime_dir=tmp_path / "runtime")
 
     assert text == ""
-    assert status == "bundled Tesseract not found at runtime/tesseract/tesseract.exe"
+    assert status == "missing_tesseract"
     assert ocr_engine == "tesseract"
     assert all(not path.exists() for path in _FakePdfDocument.rendered_paths)
     assert not list(source.parent.glob("*.png"))
@@ -243,14 +247,18 @@ def test_extract_image_sets_portable_tessdata_prefix(tmp_path: Path, monkeypatch
     (tessdata / "vie.traineddata").write_bytes(b"vie")
     captured_env = None
     captured_encoding = None
+    captured_creationflags = None
 
     def fake_run(args, **kwargs):
         nonlocal captured_env
         nonlocal captured_encoding
+        nonlocal captured_creationflags
         captured_env = kwargs.get("env")
         captured_encoding = kwargs.get("encoding")
+        captured_creationflags = kwargs.get("creationflags")
         return subprocess.CompletedProcess(args=args, returncode=0, stdout="văn bản", stderr="")
 
+    monkeypatch.setattr(extractors.subprocess, "CREATE_NO_WINDOW", 0x08000000, raising=False)
     monkeypatch.setattr(extractors.subprocess, "run", fake_run)
 
     text, status, ocr_engine = extractors.extract_text(source, runtime_dir=tmp_path / "runtime")
@@ -260,6 +268,7 @@ def test_extract_image_sets_portable_tessdata_prefix(tmp_path: Path, monkeypatch
     assert ocr_engine == "tesseract"
     assert captured_env["TESSDATA_PREFIX"] == str(tessdata)
     assert captured_encoding == "utf-8"
+    assert captured_creationflags == 0x08000000
 
 
 def test_extract_pdf_respects_ocr_disabled_for_short_text(tmp_path: Path, monkeypatch) -> None:
@@ -301,5 +310,20 @@ def test_extract_pdf_respects_ocr_max_pages(tmp_path: Path, monkeypatch) -> None
     text, status, ocr_engine = extractors.extract_text(source, runtime_dir=tmp_path / "runtime")
 
     assert text == "page-1"
+    assert status == "ok"
+    assert ocr_engine == "tesseract"
+
+
+def test_extract_pdf_ocr_joins_all_pages_by_default(tmp_path: Path, monkeypatch) -> None:
+    source = tmp_path / "scan.pdf"
+    source.write_bytes(b"pdf")
+    _FakePdfDocument.rendered_paths = []
+    monkeypatch.delenv("PHANLOAIVANBAN_OCR_MAX_PAGES", raising=False)
+    monkeypatch.setitem(sys.modules, "pypdfium2", SimpleNamespace(PdfDocument=_FakePdfDocument))
+    monkeypatch.setattr(extractors, "_extract_image", lambda path, runtime_dir: (path.stem, "ok", "tesseract"))
+
+    text, status, ocr_engine = extractors.extract_text(source, runtime_dir=tmp_path / "runtime")
+
+    assert text == "page-1\n\npage-2"
     assert status == "ok"
     assert ocr_engine == "tesseract"

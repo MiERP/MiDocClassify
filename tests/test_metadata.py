@@ -95,6 +95,8 @@ def test_template_1_documents_extract_expected_metadata() -> None:
 
 def test_template_2_decision_extracts_header_positions() -> None:
     path = Path("data-template/2/1202_QD-TTg_713288.docx")
+    if not path.exists():
+        pytest.skip("fixture data-template/2 is not present")
     text, status, ocr_engine = extract_text(path)
     record = DocumentRecord(
         original_path=path,
@@ -139,6 +141,8 @@ def test_missing_document_type_defaults_to_cong_van() -> None:
 
 def test_template_2_pdf_handwritten_number_and_agency_recovery() -> None:
     path = Path("data-template/2/713287.pdf")
+    if not path.exists():
+        pytest.skip("fixture data-template/2 is not present")
     text, status, ocr_engine = extract_text(path)
     record = DocumentRecord(
         original_path=path,
@@ -159,6 +163,8 @@ def test_template_2_pdf_handwritten_number_and_agency_recovery() -> None:
 
 def test_template_3_scanned_header_metadata() -> None:
     folder = Path("data-template/3")
+    if not folder.exists():
+        pytest.skip("fixture data-template/3 is not present")
     expected = {
         "13268_1532000620.pdf": ("13268/QLD-KD", "2018-07-12"),
         "38-2026-tt-bkhcn0001-1783388649815943304004.pdf": ("38/2026/TT-BKHCN", "2026-07-01"),

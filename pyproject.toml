@@ -5,11 +5,25 @@ description = "Lightweight Vietnamese legal document classifier"
 requires-python = ">=3.10"
 dependencies = []
 
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
 [project.optional-dependencies]
 desktop = ["PySide6>=6.6"]
-parsers = ["pypdfium2>=4.30", "python-docx>=1.1", "PyYAML>=6.0"]
+parsers = ["pypdfium2>=4.30", "python-docx>=1.1", "PyYAML>=6.0", "Pillow>=10.0"]
 test = ["pytest>=8.0"]
+dev = ["pytest>=8.0", "pypdfium2>=4.30", "python-docx>=1.1", "PyYAML>=6.0", "Pillow>=10.0"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+addopts = "-q --strict-markers"
+markers = [
+    "requires_parsers: tests needing pypdfium2/python-docx/Pillow",
+    "requires_desktop: tests needing the PySide6 GUI stack",
+    "slow: long-running tests",
+]

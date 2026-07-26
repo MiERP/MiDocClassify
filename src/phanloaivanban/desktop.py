@@ -1,15 +1,17 @@
 from __future__ import annotations
 
-import re
-import sqlite3
+import os
 import unicodedata
 from pathlib import Path
 
-from .llm import LocalLLM
-from .pipeline import iter_documents, sync_folder
-from .storage import FIELDS, export_csv
+from .pipeline import ScanOptions, iter_documents, sync_folder
+from .storage import FIELDS, export_csv, load_document_rows
 
 REVIEW_ROW_COLOR = "#3a2d14"
+WINDOW_TITLE = (
+    "MiDoc - Classify \u2014 Ph\u1ea7n m\u1ec1m qu\u1ea3n l\u00fd th\u1ed1ng k\u00ea t\u00e0i li\u1ec7u, "
+    "b\u1ea3n quy\u1ec1n ph\u1ea7n m\u1ec1m thu\u1ed9c v\u1ec1 Long-HAVS. Chi ti\u1ebft li\u00ean h\u1ec7 0982.958.730."
+)
 VISIBLE_FIELDS = ["so_van_ban", "ten_van_ban", "co_quan_phat_hanh", "ngay_ban_hanh", "loai_van_ban", "trich_yeu"]
 APP_STATE_PATH = Path("data/desktop_state.txt")
 SEARCH_FIELDS = ["so_van_ban", "ten_van_ban", "co_quan_phat_hanh", "loai_van_ban"]
@@ -73,14 +75,14 @@ QTableCornerButton::section {
     border-bottom: 2px solid #1e3a8a;
     border-right: 1px solid #1e3a8a;
 }
-QLineEdit, QTextEdit {
+QLineEdit {
     background-color: #101f42;
     border: 1px solid #1e3a8a;
     border-radius: 6px;
     color: #ffffff;
     padding: 8px;
 }
-QLineEdit:focus, QTextEdit:focus {
+QLineEdit:focus {
     border: 1px solid #38bdf8;
 }
 QComboBox {
@@ -124,21 +126,16 @@ QPushButton:disabled {
     color: #64748b;
     border-color: #1e293b;
 }
-QPushButton#scan_btn, QPushButton#chat_send {
+QPushButton#scan_btn {
     background-color: #0284c7;
     border: 1px solid #38bdf8;
     color: #ffffff;
 }
-QPushButton#scan_btn:hover, QPushButton#chat_send:hover {
+QPushButton#scan_btn:hover {
     background-color: #0ea5e9;
 }
-QPushButton#scan_btn:pressed, QPushButton#chat_send:pressed {
+QPushButton#scan_btn:pressed {
     background-color: #0369a1;
-}
-QPushButton#history_btn, QPushButton#settings_btn {
-    font-size: 14px;
-    padding: 6px 10px;
-    min-width: 20px;
 }
 QScrollBar:vertical {
     background-color: #0a1128;
@@ -169,11 +166,6 @@ QWidget#selected_row_panel {
     background-color: #101f42;
     border: 1px solid #1e3a8a;
     border-radius: 8px;
-}
-QLabel#author_label {
-    color: #94a3b8;
-    background-color: transparent;
-    font-weight: bold;
 }
 """
 
@@ -219,17 +211,6 @@ def _filter_rows(rows: list[dict[str, object]], field: str, query: str) -> list[
     return [row for row in rows if normalized_query in _normalize_search_text(row.get(field))]
 
 
-def _select_fields(existing_columns: set[str]) -> list[str]:
-    return [field if field in existing_columns else "''" for field in FIELDS]
-
-
-def _folder_filter(folder: Path | None) -> tuple[str, tuple[str, ...]]:
-    if folder is None:
-        return "", ()
-    folder_text = str(folder).rstrip("\\/")
-    return " WHERE original_path LIKE ? OR original_path LIKE ?", (f"{folder_text}\\%", f"{folder_text}/%")
-
-
 def _progress_text(current: int, total: int, file_name: str | None = None, action: str = "Đang xử lý") -> str:
     if total <= 0:
         return "Không tìm thấy file được hỗ trợ trong thư mục đã chọn."
@@ -250,19 +231,7 @@ def _folder_signature(folder: Path | None) -> tuple[tuple[str, int, int], ...]:
 
 
 def _load_document_rows(db_path: Path, folder: Path | None = None) -> list[dict[str, object]]:
-    if not db_path.exists():
-        return []
-    with sqlite3.connect(db_path) as conn:
-        columns = {row[1] for row in conn.execute("PRAGMA table_info(documents)")}
-        where_clause, params = _folder_filter(folder)
-        selected = _select_fields(columns)
-        rows = list(
-            conn.execute(
-                f"SELECT {', '.join(selected)} FROM documents{where_clause} ORDER BY file_name",
-                params,
-            )
-        )
-    return [dict(zip(FIELDS, row)) for row in rows]
+    return load_document_rows(db_path, folder)
 
 
 def _open_path_from_row(row: dict[str, object]) -> str | None:
@@ -273,53 +242,12 @@ def _open_path_from_row(row: dict[str, object]) -> str | None:
     return Path(original_path).resolve().as_uri() if original_path else None
 
 
-def _read_wiki(path: object) -> str:
-    wiki_path = Path(str(path or ""))
-    if not wiki_path.exists():
-        return ""
-    return wiki_path.read_text(encoding="utf-8", errors="ignore")
-
-
-def _keywords(text: str) -> set[str]:
-    return {word.lower() for word in re.findall(r"[\w/]{3,}", text, flags=re.UNICODE)}
-
-
-def _build_chat_context(
-    rows: list[dict[str, object]],
-    question: str,
-    selected_index: int | None = None,
-    selected_only: bool = True,
-    max_chars: int = 9000,
-) -> tuple[str, list[str]]:
-    candidates = rows
-    if selected_only and selected_index is not None and 0 <= selected_index < len(rows):
-        candidates = [rows[selected_index]]
-    elif not selected_only:
-        question_words = _keywords(question)
-        candidates = sorted(
-            rows,
-            key=lambda row: len(question_words & _keywords(" ".join(str(row.get(field) or "") for field in VISIBLE_FIELDS))),
-            reverse=True,
-        )[:5]
-
-    parts: list[str] = []
-    sources: list[str] = []
-    for row in candidates:
-        wiki = _read_wiki(row.get("wiki_path"))
-        if not wiki:
-            continue
-        source = f"{row.get('so_van_ban') or ''} - {row.get('ten_van_ban') or row.get('file_name') or ''}".strip(" -")
-        sources.append(source)
-        parts.append(f"# SOURCE: {source}\n{wiki[:max_chars]}")
-        if sum(len(part) for part in parts) >= max_chars:
-            break
-    return "\n\n".join(parts)[:max_chars], sources
-
-
 def run(db_path: Path) -> int:
+    if os.name == "nt":
+        os.environ["QT_IM_MODULE"] = "windows"
     try:
         from PySide6.QtCore import QObject, QThread, Qt, QUrl, Signal, QTimer, QRectF
-        from PySide6.QtGui import QColor, QDesktopServices, QPainter, QFont, QAction, QPen, QIcon
+        from PySide6.QtGui import QColor, QDesktopServices, QPainter, QFont, QPen, QIcon
         from PySide6.QtWidgets import (
             QApplication,
             QComboBox,
@@ -329,18 +257,10 @@ def run(db_path: Path) -> int:
             QLineEdit,
             QMainWindow,
             QPushButton,
-            QSplitter,
             QTableWidget,
             QTableWidgetItem,
-            QTextEdit,
             QVBoxLayout,
             QWidget,
-            QDialog,
-            QDialogButtonBox,
-            QDoubleSpinBox,
-            QSpinBox,
-            QFormLayout,
-            QMenu,
             QHeaderView,
             QGridLayout,
             QSizePolicy,
@@ -410,54 +330,15 @@ def run(db_path: Path) -> int:
             painter.setPen(QColor("#ffffff"))
             painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, f"{self.value}%")
 
-    class SettingsDialog(QDialog):
-        def __init__(self, current_temp: float, current_max_tokens: int, parent: QWidget | None = None) -> None:
-            super().__init__(parent)
-            self.setWindowTitle("LLM Parameter Settings")
-            self.setModal(True)
-            self.resize(320, 160)
-            
-            # Apply same dark style
-            self.setStyleSheet(DARK_STYLE)
-            
-            layout = QVBoxLayout(self)
-            form = QFormLayout()
-            
-            self.temp_spin = QDoubleSpinBox()
-            self.temp_spin.setRange(0.0, 1.0)
-            self.temp_spin.setSingleStep(0.1)
-            self.temp_spin.setValue(current_temp)
-            
-            self.tokens_spin = QSpinBox()
-            self.tokens_spin.setRange(128, 2048)
-            self.tokens_spin.setSingleStep(64)
-            self.tokens_spin.setValue(current_max_tokens)
-            
-            form.addRow("Temperature (0.0 - 1.0):", self.temp_spin)
-            form.addRow("Max Tokens:", self.tokens_spin)
-            
-            layout.addLayout(form)
-            
-            self.buttons = QDialogButtonBox(
-                QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
-            )
-            self.buttons.accepted.connect(self.accept)
-            self.buttons.rejected.connect(self.reject)
-            layout.addWidget(self.buttons)
-
-        def get_values(self) -> tuple[float, int]:
-            return self.temp_spin.value(), self.tokens_spin.value()
-
     class ScanWorker(QObject):
         progress = Signal(int, int, str, str)
         finished = Signal(int, int, int, str)
         failed = Signal(str)
 
-        def __init__(self, folder: Path, db_path: Path, csv_path: Path) -> None:
+        def __init__(self, folder: Path, db_path: Path) -> None:
             super().__init__()
             self.folder = folder
             self.db_path = db_path
-            self.csv_path = csv_path
 
         def run(self) -> None:
             try:
@@ -467,68 +348,31 @@ def run(db_path: Path) -> int:
                 def report(current: int, total_count: int, path: Path, action: str = "Đang xử lý") -> None:
                     self.progress.emit(current, total_count, path.name, action)
 
-                records, deleted_count = sync_folder(self.folder, self.db_path, self.csv_path, progress_callback=report)
+                records, deleted_count = sync_folder(self.folder, self.db_path, progress_callback=report, options=ScanOptions())
                 review_count = sum(1 for record in records if record.needs_review)
-                self.finished.emit(len(records), deleted_count, review_count, str(self.csv_path))
+                self.finished.emit(len(records), deleted_count, review_count, "")
             except Exception as exc:  # pragma: no cover - GUI runtime path
                 self.failed.emit(str(exc))
-
-    class ChatWorker(QObject):
-        finished = Signal(str, str)
-        failed = Signal(str)
-
-        def __init__(self, question: str, context: str, sources: list[str], temperature: float, max_tokens: int) -> None:
-            super().__init__()
-            self.question = question
-            self.context = context
-            self.sources = sources
-            self.temperature = temperature
-            self.max_tokens = max_tokens
-
-        def run(self) -> None:
-            llm = LocalLLM(temperature=self.temperature, max_tokens=self.max_tokens)
-            try:
-                if not self.context:
-                    self.failed.emit("Không có nội dung wiki cho câu hỏi này.")
-                    return
-                answer = llm.ask(self.question, self.context)
-                if not answer:
-                    self.failed.emit("LLM chưa sẵn sàng hoặc không phản hồi.")
-                    return
-                source_text = "; ".join(self.sources) if self.sources else "không rõ"
-                self.finished.emit(answer, source_text)
-            finally:
-                llm.close()
 
     class Window(QMainWindow):
         def __init__(self) -> None:
             super().__init__()
-            self.setWindowTitle("MiDoc - Classify")
-            
+            self.setWindowTitle(WINDOW_TITLE)
+
             # Set window icon
             icon_path = Path("D:/PROJECT/Agentic-AI/phanloaivanban/logo.ico")
             if not icon_path.exists():
                 icon_path = Path(__file__).parents[2] / "logo.ico"
             if icon_path.exists():
                 self.setWindowIcon(QIcon(str(icon_path.resolve())))
-                
+
             self.db_path = db_path
             self.all_rows: list[dict[str, object]] = []
             self.rows: list[dict[str, object]] = []
             self.current_scan_folder: Path | None = None
             self.scan_thread: QThread | None = None
             self.scan_worker: ScanWorker | None = None
-            self.chat_thread: QThread | None = None
-            self.chat_worker: ChatWorker | None = None
             self.synced_folder_signature: tuple[tuple[str, int, int], ...] = ()
-
-            # LLM parameters
-            self.llm_temperature = 0.0
-            self.llm_max_tokens = 768
-
-            # Chat history session management
-            self.chat_sessions: list[dict[str, object]] = []
-            self.current_session_questions: list[str] = []
 
             # 1. Main Title Header
             self.app_title_label = QLabel("<span style='color:#22c55e'>MiDoc</span><span style='color:#f97316'> - Classify</span>")
@@ -551,10 +395,6 @@ def run(db_path: Path) -> int:
             header_layout.addWidget(self.search_field)
             header_layout.addWidget(self.search_input)
             header_layout.addWidget(self.search_btn)
-
-            # Author Label (Góc dưới bên phải)
-            self.author_label = QLabel("Phạm Văn Long - HAVS")
-            self.author_label.setObjectName("author_label")
 
             # Selection Labels Panel (Hiển thị thông tin khi chọn dòng)
             self.selected_row_panel = QWidget()
@@ -600,8 +440,9 @@ def run(db_path: Path) -> int:
             grid.setColumnStretch(3, 1)
 
             # 2. Table Widget
-            self.table = QTableWidget(0, len(VISIBLE_FIELDS))
-            self.table.setHorizontalHeaderLabels([FIELD_LABELS[field] for field in VISIBLE_FIELDS])
+            table_fields = VISIBLE_FIELDS
+            self.table = QTableWidget(0, len(table_fields))
+            self.table.setHorizontalHeaderLabels([FIELD_LABELS[field] for field in table_fields])
             self.table.cellDoubleClicked.connect(self.open_original_file)
             self.table.itemSelectionChanged.connect(self.update_selected_row_labels)
             self.table_corner_label = QLabel("TT", self.table)
@@ -619,7 +460,7 @@ def run(db_path: Path) -> int:
                 "loai_van_ban": (QHeaderView.ResizeMode.Interactive, 120),
                 "trich_yeu": (QHeaderView.ResizeMode.Stretch, 400),
             }
-            for i, field in enumerate(VISIBLE_FIELDS):
+            for i, field in enumerate(table_fields):
                 mode, size = col_modes.get(field, (QHeaderView.ResizeMode.Interactive, 100))
                 header.setSectionResizeMode(i, mode)
                 if mode == QHeaderView.ResizeMode.Interactive:
@@ -654,8 +495,6 @@ def run(db_path: Path) -> int:
 
             bottom_row_layout = QHBoxLayout()
             bottom_row_layout.addWidget(self.status)
-            bottom_row_layout.addStretch()
-            bottom_row_layout.addWidget(self.author_label)
 
             left = QWidget()
             left_layout = QVBoxLayout()
@@ -666,56 +505,8 @@ def run(db_path: Path) -> int:
             left_layout.addLayout(bottom_row_layout)
             left.setLayout(left_layout)
 
-            # 4. Chat Area Layout
-            chat_header = QHBoxLayout()
-            self.chat_scope = QComboBox()
-            self.chat_scope.addItems(["Tài liệu đang chọn", "Tất cả tài liệu đã quét"])
-            
-            self.history_btn = QPushButton("🕒")
-            self.history_btn.setObjectName("history_btn")
-            self.history_btn.setToolTip("Lịch sử chat (3 phiên gần nhất)")
-            self.history_btn.clicked.connect(self.show_history_menu)
-            
-            self.settings_btn = QPushButton("⚙️")
-            self.settings_btn.setObjectName("settings_btn")
-            self.settings_btn.setToolTip("Cài đặt LLM")
-            self.settings_btn.clicked.connect(self.open_settings)
-            
-            chat_header.addWidget(self.chat_scope, stretch=1)
-            chat_header.addWidget(self.history_btn)
-            chat_header.addWidget(self.settings_btn)
-
-            self.chat_history = QTextEdit()
-            self.chat_history.setReadOnly(True)
-            
-            self.chat_input = QLineEdit()
-            self.chat_input.setPlaceholderText("Nhập câu hỏi về tài liệu...")
-            self.chat_input.returnPressed.connect(self.ask_chat)
-            
-            self.chat_send = QPushButton("➤")
-            self.chat_send.setObjectName("chat_send")
-            self.chat_send.clicked.connect(self.ask_chat)
-            
-            chat_input_row = QHBoxLayout()
-            chat_input_row.addWidget(self.chat_input)
-            chat_input_row.addWidget(self.chat_send)
-            
-            chat_panel = QWidget()
-            chat_layout = QVBoxLayout()
-            chat_layout.addWidget(QLabel("Chat với tài liệu"))
-            chat_layout.addLayout(chat_header)
-            chat_layout.addWidget(self.chat_history)
-            chat_layout.addLayout(chat_input_row)
-            chat_panel.setLayout(chat_layout)
-
-            # Splitter between panels
-            splitter = QSplitter(Qt.Orientation.Horizontal)
-            splitter.addWidget(left)
-            splitter.addWidget(chat_panel)
-            splitter.setSizes([850, 450])
-
             layout = QVBoxLayout()
-            layout.addWidget(splitter)
+            layout.addWidget(left)
             root = QWidget()
             root.setLayout(layout)
             self.setCentralWidget(root)
@@ -756,7 +547,7 @@ def run(db_path: Path) -> int:
             if not self.current_scan_folder:
                 self.status.setText("Vui long chon thu muc truoc khi quet!")
                 return
-            self._start_scan(self.current_scan_folder, Path("output/export.csv"))
+            self._start_scan(self.current_scan_folder)
 
         def refresh_scan_button_state(self) -> None:
             if self.scan_thread is not None:
@@ -766,12 +557,13 @@ def run(db_path: Path) -> int:
                 self.scan_btn.setEnabled(False)
                 return
             current_signature = _folder_signature(self.current_scan_folder)
-            changed = current_signature != self.synced_folder_signature
+            missing_wiki = any(not str(row.get("wiki_path") or "").strip() for row in self.rows)
+            changed = current_signature != self.synced_folder_signature or missing_wiki
             if self.synced_folder_signature:
                 self.scan_btn.setText("Cập nhật")
             self.scan_btn.setEnabled(changed)
 
-        def _start_scan(self, folder: Path, csv_path: Path) -> None:
+        def _start_scan(self, folder: Path) -> None:
             self.browse_btn.setEnabled(False)
             self.scan_btn.setEnabled(False)
             self.export_btn.setEnabled(False)
@@ -779,7 +571,7 @@ def run(db_path: Path) -> int:
             self.loading_circle.start_spinning()
             self.status.setText(f"Đang chuẩn bị quét: {folder}")
             self.scan_thread = QThread(self)
-            self.scan_worker = ScanWorker(folder, self.db_path, csv_path)
+            self.scan_worker = ScanWorker(folder, self.db_path)
             self.scan_worker.moveToThread(self.scan_thread)
             self.scan_thread.started.connect(self.scan_worker.run)
             self.scan_worker.progress.connect(self._update_scan_progress)
@@ -804,7 +596,7 @@ def run(db_path: Path) -> int:
         def _finish_scan(self, row_count: int, deleted_count: int, review_count: int, csv_path: str) -> None:
             self.loading_circle.set_value(100)
             self.synced_folder_signature = _folder_signature(self.current_scan_folder)
-            self.status.setText(f"Da dong bo {row_count} file moi/doi; xoa {deleted_count} file. CSV: {csv_path}")
+            self.status.setText(f"Đã đồng bộ {row_count} file mới/đổi; xóa {deleted_count} file.")
             self.browse_btn.setEnabled(True)
             self.scan_btn.setText("Cập nhật")
             self.scan_btn.setEnabled(False)
@@ -842,6 +634,7 @@ def run(db_path: Path) -> int:
 
         def populate_table(self, rows: list[dict[str, object]]) -> None:
             self.table.setSortingEnabled(False)
+            self.table.blockSignals(True)
             self.rows = rows
             self.table.setRowCount(len(self.rows))
             review_color = QColor(REVIEW_ROW_COLOR)
@@ -859,6 +652,7 @@ def run(db_path: Path) -> int:
                     if row_needs_review:
                         item.setBackground(review_color)
                     self.table.setItem(row_idx, col_idx, item)
+            self.table.blockSignals(False)
             self._configure_table()
             self.update_selected_row_labels()
 
@@ -925,128 +719,10 @@ def run(db_path: Path) -> int:
             self._sync_table_corner_label()
             w = self.width()
             title_size = max(18, min(24, int(w / 1400.0 * 20.0)))
-            author_size = max(8, int(title_size / 3.0))
-            
+
             font_title = self.app_title_label.font()
             font_title.setPointSize(title_size)
             self.app_title_label.setFont(font_title)
-            
-            font_author = self.author_label.font()
-            font_author.setPointSize(author_size)
-            self.author_label.setFont(font_author)
-
-        def open_settings(self) -> None:
-            dialog = SettingsDialog(self.llm_temperature, self.llm_max_tokens, self)
-            if dialog.exec() == QDialog.DialogCode.Accepted:
-                self.llm_temperature, self.llm_max_tokens = dialog.get_values()
-                self.chat_history.append(
-                    f"<i>Cài đặt LLM đã cập nhật: Temp={self.llm_temperature}, Max Tokens={self.llm_max_tokens}</i>"
-                )
-
-        def show_history_menu(self) -> None:
-            menu = QMenu(self)
-            menu.setStyleSheet(DARK_STYLE)
-            
-            # Action: Start new session
-            new_session_action = QAction("Bắt đầu phiên mới", self)
-            new_session_action.triggered.connect(self.start_new_chat_session)
-            menu.addAction(new_session_action)
-            menu.addSeparator()
-
-            if not self.chat_sessions:
-                no_history = QAction("Không có lịch sử", self)
-                no_history.setEnabled(False)
-                menu.addAction(no_history)
-            else:
-                for idx, session in enumerate(self.chat_sessions):
-                    preview = session["preview"]
-                    if len(preview) > 30:
-                        preview = preview[:27] + "..."
-                    action = QAction(f"{idx+1}. {preview}", self)
-                    action.triggered.connect(lambda checked=False, i=idx: self.load_chat_session(i))
-                    menu.addAction(action)
-
-            # Show menu under history button
-            menu.exec(self.history_btn.mapToGlobal(self.history_btn.rect().bottomLeft()))
-
-        def start_new_chat_session(self) -> None:
-            # Save current session to history if there is any history content
-            if self.current_session_questions:
-                session_data = {
-                    "preview": self.current_session_questions[0],
-                    "html": self.chat_history.toHtml(),
-                    "questions": list(self.current_session_questions)
-                }
-                # Prepend and slice to maximum 3 sessions
-                self.chat_sessions = [session_data] + self.chat_sessions
-                if len(self.chat_sessions) > 3:
-                    self.chat_sessions = self.chat_sessions[:3]
-
-            # Clear current state
-            self.chat_history.clear()
-            self.current_session_questions = []
-            self.chat_history.append("<i>Bắt đầu phiên chat mới...</i>")
-
-        def load_chat_session(self, index: int) -> None:
-            if 0 <= index < len(self.chat_sessions):
-                # Archive the current chat first
-                current_html = self.chat_history.toHtml()
-                current_questions = list(self.current_session_questions)
-
-                # Load selected session
-                session = self.chat_sessions[index]
-                self.chat_history.setHtml(session["html"])
-                self.current_session_questions = list(session["questions"])
-
-                # Save current back to history slot
-                if current_questions:
-                    self.chat_sessions[index] = {
-                        "preview": current_questions[0],
-                        "html": current_html,
-                        "questions": current_questions
-                    }
-
-        def ask_chat(self) -> None:
-            question = self.chat_input.text().strip()
-            if not question:
-                return
-            
-            # Save query for session preview
-            self.current_session_questions.append(question)
-            
-            selected_only = self.chat_scope.currentIndex() == 0
-            selected_index = self.selected_source_row_index()
-            context, sources = _build_chat_context(self.rows, question, selected_index, selected_only)
-            self.chat_history.append(f"Bạn: {question}")
-            self.chat_input.clear()
-            self.chat_send.setEnabled(False)
-            self.chat_history.append("Hệ thống: đang hỏi LLM...")
-            self.chat_thread = QThread(self)
-            self.chat_worker = ChatWorker(
-                question, context, sources, self.llm_temperature, self.llm_max_tokens
-            )
-            self.chat_worker.moveToThread(self.chat_thread)
-            self.chat_thread.started.connect(self.chat_worker.run)
-            self.chat_worker.finished.connect(self._finish_chat)
-            self.chat_worker.failed.connect(self._fail_chat)
-            self.chat_worker.finished.connect(self.chat_thread.quit)
-            self.chat_worker.failed.connect(self.chat_thread.quit)
-            self.chat_thread.finished.connect(self.chat_worker.deleteLater)
-            self.chat_thread.finished.connect(self.chat_thread.deleteLater)
-            self.chat_thread.finished.connect(self._clear_chat_worker)
-            self.chat_thread.start()
-
-        def _finish_chat(self, answer: str, source_text: str) -> None:
-            self.chat_history.append(f"LLM: {answer}\nNguồn: {source_text}")
-            self.chat_send.setEnabled(True)
-
-        def _fail_chat(self, message: str) -> None:
-            self.chat_history.append(f"Hệ thống: {message}")
-            self.chat_send.setEnabled(True)
-
-        def _clear_chat_worker(self) -> None:
-            self.chat_thread = None
-            self.chat_worker = None
 
         def _sync_table_corner_label(self) -> None:
             if not hasattr(self, "table_corner_label"):
